@@ -10,48 +10,72 @@ import java.io.StringReader
 
 class PairingManager(private val context: Context) {
 
-    interface PairingCallback {
+    interface PairingStepCallback {
+        fun onStep1Success(serverSaltHex: String)
         fun onPairingSuccess()
-        fun onPairingError(error: String)
-        fun onStepUpdate(step: String)
+        fun onError(error: String)
+        fun onLog(msg: String)
     }
 
-    fun startPairing(host: String, port: Int, pin: String, callback: PairingCallback) {
+    fun initiatePairing(host: String, port: Int, pin: String, callback: PairingStepCallback) {
         Thread {
             try {
                 val uniqueId = PreferenceUtils.getUniqueId(context)
                 val clientCertHex = CryptoUtils.getCertificateHex(context)
-                val salt = CryptoUtils.randomBytes(16)
-                val saltHex = CryptoUtils.bytesToHex(salt)
+                val clientSalt = CryptoUtils.randomBytes(16)
+                val clientSaltHex = CryptoUtils.bytesToHex(clientSalt)
                 
-                callback.onStepUpdate("步骤 1/4: 发起配对请求...")
+                callback.onLog("Unique ID: $uniqueId")
+                callback.onLog("正在连接 $host:$port ...")
                 
-                // --- Step 1: Initial Request ---
+                // 补全参数：增加 updateTimestamp 和 localversion
                 // GET /pair?uniqueid=...&devicename=...&updateTimestamp=...&localversion=...&salt=...&clientcert=...
-                val url1 = buildUrl(host, port, "salt=$saltHex&clientcert=$clientCertHex")
+                val query = "salt=$clientSaltHex&clientcert=$clientCertHex&updateTimestamp=0&localversion=0"
+                val url1 = buildUrl(host, port, query)
+                
+                callback.onLog("请求URL: $url1")
+                
                 val resp1 = executeRequest(url1, uniqueId)
                 
+                callback.onLog("Step 1 响应码: ${resp1.statusCode}")
+                callback.onLog("Step 1 消息: ${resp1.statusMessage}")
+                
                 if (resp1.statusCode != 200) {
-                    callback.onPairingError("拒绝连接: ${resp1.statusMessage}")
+                    callback.onError("连接被拒绝: ${resp1.statusMessage} (${resp1.statusCode})")
                     return@Thread
                 }
                 
-                val plainCertHex = resp1.xmlMap["plaincert"] ?: ""
-                val serverSaltHex = resp1.xmlMap["salt"] ?: "" // Sunshine returns its own salt? (Actually usually client salt is used)
-                // Note: GameStream protocol is tricky. 
-                // Usually we use the salt WE sent + PIN to derive the AES key.
+                val serverSaltHex = resp1.xmlMap["salt"] ?: ""
+                if (serverSaltHex.isEmpty()) {
+                    callback.onError("服务器未返回 Salt")
+                    return@Thread
+                }
                 
-                // Deriving AES Key from PIN and Salt
-                // Key = SHA256(Salt + PIN) (First 16 bytes for AES-128)
+                callback.onLog("获取到 Server Salt: $serverSaltHex")
+                callback.onStep1Success(serverSaltHex)
+
+            } catch (e: Exception) {
+                Log.e("Pairing", "Init Error", e)
+                callback.onError("初始化失败: ${e.message}")
+            }
+        }.start()
+    }
+
+    // 第二阶段逻辑保持不变，主要是 executeRequest 和 buildUrl 需要一致
+    fun completePairing(host: String, port: Int, pin: String, serverSaltHex: String, callback: PairingStepCallback) {
+        Thread {
+            try {
+                val uniqueId = PreferenceUtils.getUniqueId(context)
+                callback.onLog("开始计算密钥...")
+
+                val serverSalt = CryptoUtils.hexToBytes(serverSaltHex)
                 val pinBytes = pin.toByteArray(Charsets.UTF_8)
-                val combined = CryptoUtils.concat(salt, pinBytes)
+                val combined = CryptoUtils.concat(serverSalt, pinBytes)
                 val keyFull = CryptoUtils.sha256(combined)
                 val aesKey = ByteArray(16)
                 System.arraycopy(keyFull, 0, aesKey, 0, 16)
                 
-                // --- Step 2: Client Challenge ---
-                callback.onStepUpdate("步骤 2/4: 验证 PIN 码...")
-                
+                callback.onLog("Step 2: 发送 Challenge...")
                 val clientSecret = CryptoUtils.randomBytes(16)
                 val clientSecretEnc = CryptoUtils.aesEncrypt(clientSecret, aesKey)
                 val clientSecretHex = CryptoUtils.bytesToHex(clientSecretEnc)
@@ -60,22 +84,17 @@ class PairingManager(private val context: Context) {
                 val resp2 = executeRequest(url2, uniqueId)
                 
                 if (resp2.statusCode != 200) {
-                    callback.onPairingError("PIN 码错误或验证失败")
+                    callback.onError("PIN 验证失败: ${resp2.statusCode}")
                     return@Thread
                 }
                 
                 val serverChallengeRespHex = resp2.xmlMap["serverchallengeresp"]
                 if (serverChallengeRespHex == null) {
-                    callback.onPairingError("服务器响应异常")
+                    callback.onError("服务器响应异常 (Missing Challenge Resp)")
                     return@Thread
                 }
                 
-                // Verify server response (Optional but recommended)
-                // Decrypt serverChallengeRespHex with aesKey -> should match expected logic
-                
-                // --- Step 3: Client Pairing Secret ---
-                callback.onStepUpdate("步骤 3/4: 交换密钥...")
-                
+                callback.onLog("Step 3: 交换配对密钥...")
                 val clientPairingSecret = CryptoUtils.randomBytes(16)
                 val clientPairingSecretEnc = CryptoUtils.aesEncrypt(clientPairingSecret, aesKey)
                 val clientPairingSecretHex = CryptoUtils.bytesToHex(clientPairingSecretEnc)
@@ -84,26 +103,20 @@ class PairingManager(private val context: Context) {
                 val resp3 = executeRequest(url3, uniqueId)
                 
                 if (resp3.statusCode != 200) {
-                    callback.onPairingError("密钥交换失败")
+                    callback.onError("密钥交换失败")
                     return@Thread
                 }
                 
                 val serverPairingSecretHex = resp3.xmlMap["serverpairingsecret"]
                 
-                // --- Step 4: Signature ---
-                callback.onStepUpdate("步骤 4/4: 签署证书...")
-                
-                // Signature structure:
-                // X.509 Cert (DER) + Server Pairing Secret (16 bytes)
-                // Signed with Client Private Key (SHA256withRSA)
-                
+                callback.onLog("Step 4: 签署证书...")
                 val serverSecretBytes = CryptoUtils.hexToBytes(serverPairingSecretHex ?: "")
                 val myCertBytes = CryptoUtils.getCertificateBytes(context) ?: ByteArray(0)
                 val dataToSign = CryptoUtils.concat(myCertBytes, serverSecretBytes)
                 
                 val signature = CryptoUtils.signData(context, dataToSign)
                 if (signature == null) {
-                    callback.onPairingError("签名失败")
+                    callback.onError("签名失败")
                     return@Thread
                 }
                 
@@ -113,17 +126,17 @@ class PairingManager(private val context: Context) {
                 val resp4 = executeRequest(url4, uniqueId)
                 
                 if (resp4.statusCode == 200 && resp4.xmlMap["paired"] == "1") {
-                    callback.onStepUpdate("配对成功！")
+                    callback.onLog("配对成功!")
                     callback.onPairingSuccess()
                 } else {
-                    callback.onPairingError("最终验证失败")
+                    callback.onError("最终验证失败: ${resp4.statusMessage}")
                 }
 
             } catch (e: Exception) {
-                Log.e("Pairing", "Error", e)
-                callback.onPairingError("异常: ${e.message}")
+                Log.e("Pairing", "Complete Error", e)
+                callback.onError("验证过程异常: ${e.message}")
             }
-        }
+        }.start()
     }
 
     private fun buildUrl(host: String, port: Int, query: String): String {
@@ -135,11 +148,25 @@ class PairingManager(private val context: Context) {
     private data class Response(val statusCode: Int, val statusMessage: String, val xmlMap: Map<String, String>)
 
     private fun executeRequest(url: String, uniqueId: String): Response {
-        // Pairing uses HTTP usually (port 47989) or HTTPS (47984)
-        // Sunshine usually accepts pairing on HTTP 47989
-        val client = NetworkUtils.getUnsafeOkHttpClient() // Use unsafe for pairing
+        val client = NetworkUtils.getUnsafeOkHttpClient()
+        
+        // Append common parameters if not present in url
+        var fullUrl = url
+        if (!fullUrl.contains("uniqueid=")) {
+            fullUrl += "&uniqueid=$uniqueId"
+        }
+        if (!fullUrl.contains("devicename=")) {
+            fullUrl += "&devicename=AndroidMouse"
+        }
+        if (!fullUrl.contains("updateTimestamp=")) {
+             fullUrl += "&updateTimestamp=0"
+        }
+        if (!fullUrl.contains("localversion=")) {
+             fullUrl += "&localversion=0"
+        }
+        
         val request = Request.Builder()
-            .url("$url&uniqueid=$uniqueId&devicename=AndroidMouse")
+            .url(fullUrl)
             .header("X-Nv-ClientID", uniqueId)
             .header("Connection", "close")
             .build()
@@ -148,7 +175,6 @@ class PairingManager(private val context: Context) {
             val xml = response.body?.string() ?: ""
             val map = parseXml(xml)
             
-            // Parse status code from XML if possible (Sunshine returns <root status_code=...>)
             var code = response.code
             var msg = response.message
             
@@ -174,12 +200,9 @@ class PairingManager(private val context: Context) {
             while (eventType != XmlPullParser.END_DOCUMENT) {
                 if (eventType == XmlPullParser.START_TAG) {
                     val tagName = parser.name
-                    // Check for attributes (like status_code in root)
                     for (i in 0 until parser.attributeCount) {
                         map[parser.getAttributeName(i)] = parser.getAttributeValue(i)
                     }
-                    
-                    // Check for text content
                     try {
                         if (parser.next() == XmlPullParser.TEXT) {
                             val text = parser.text

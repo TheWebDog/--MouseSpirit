@@ -15,8 +15,16 @@ object PreferenceUtils {
     fun getUniqueId(context: Context): String {
         val prefs = getPrefs(context)
         var uuid = prefs.getString(KEY_CLIENT_ID, null)
+        
+        // 自动修复：如果检测到旧的带连字符的 UUID，强制清洗
+        if (uuid != null && uuid.contains("-")) {
+            uuid = uuid.replace("-", "").uppercase()
+            prefs.edit().putString(KEY_CLIENT_ID, uuid).apply()
+        }
+
         if (uuid == null) {
-            uuid = UUID.randomUUID().toString()
+            // Sunshine expects a hex string (UUID without dashes)
+            uuid = UUID.randomUUID().toString().replace("-", "").uppercase()
             prefs.edit().putString(KEY_CLIENT_ID, uuid).apply()
         }
         return uuid!!

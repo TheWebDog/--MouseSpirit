@@ -17,7 +17,6 @@ class HidDeviceHelper(private val context: Context, private val listener: HidCon
     private var hidDevice: BluetoothHidDevice? = null
     private var hostDevice: BluetoothDevice? = null
 
-    // Executor for background callbacks
     private val executor = Executors.newSingleThreadExecutor()
 
     interface HidConnectionListener {
@@ -27,41 +26,49 @@ class HidDeviceHelper(private val context: Context, private val listener: HidCon
     }
 
     private val serviceListener = object : BluetoothProfile.ServiceListener {
+        @SuppressLint("MissingPermission")
         override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
             if (profile == BluetoothProfile.HID_DEVICE) {
                 hidDevice = proxy as BluetoothHidDevice
                 registerHidDevice()
-                listener.onHidStateChanged("HID Proxy Connected")
+                listener.onHidStateChanged("HID 服务已连接")
+
+                val connectedDevices = hidDevice?.connectedDevices
+                if (!connectedDevices.isNullOrEmpty()) {
+                    hostDevice = connectedDevices[0]
+                    listener.onDeviceConnected(hostDevice!!)
+                    Log.d(TAG, "自动恢复连接到: ${hostDevice?.name}")
+                }
             }
         }
 
         override fun onServiceDisconnected(profile: Int) {
             if (profile == BluetoothProfile.HID_DEVICE) {
                 hidDevice = null
-                listener.onHidStateChanged("HID Proxy Disconnected")
+                listener.onHidStateChanged("HID 服务断开")
             }
         }
     }
 
     private val callback = object : BluetoothHidDevice.Callback() {
         override fun onAppStatusChanged(pluggedDevice: BluetoothDevice?, registered: Boolean) {
-            Log.d(TAG, "onAppStatusChanged: registered=$registered")
             if (registered) {
-                listener.onHidStateChanged("HID App Registered")
+                listener.onHidStateChanged("HID App 注册成功")
             } else {
-                listener.onHidStateChanged("HID App Registration Failed")
+                listener.onHidStateChanged("HID App 注册失败")
             }
         }
 
         override fun onConnectionStateChanged(device: BluetoothDevice?, state: Int) {
-            Log.d(TAG, "onConnectionStateChanged: state=$state")
             when (state) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     hostDevice = device
                     device?.let { listener.onDeviceConnected(it) }
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
-                    hostDevice = null
+                    if (hostDevice == device) {
+                        hostDevice = null
+                    }
                     device?.let { listener.onDeviceDisconnected(it) }
                 }
             }
@@ -100,23 +107,16 @@ class HidDeviceHelper(private val context: Context, private val listener: HidCon
             BluetoothHidDeviceAppQosSettings.MAX
         )
 
-        hidDevice?.registerApp(
-            sdpSettings,
-            inQos,
-            outQos,
-            executor,
-            callback
-        )
+        try {
+            hidDevice?.registerApp(sdpSettings, inQos, outQos, executor, callback)
+        } catch (e: Exception) {
+            Log.e(TAG, "注册 HID App 失败", e)
+        }
     }
 
     @SuppressLint("MissingPermission")
     fun connect(device: BluetoothDevice) {
         hidDevice?.connect(device)
-    }
-
-    @SuppressLint("MissingPermission")
-    fun disconnect() {
-        hostDevice?.let { hidDevice?.disconnect(it) }
     }
 
     @SuppressLint("MissingPermission")
@@ -133,7 +133,14 @@ class HidDeviceHelper(private val context: Context, private val listener: HidCon
     }
     
     fun cleanup() {
-        bluetoothAdapter?.closeProfileProxy(BluetoothProfile.HID_DEVICE, hidDevice)
+        if (hidDevice != null) {
+             try {
+                bluetoothAdapter?.closeProfileProxy(BluetoothProfile.HID_DEVICE, hidDevice)
+             } catch (e: Exception) {
+                 Log.e(TAG, "Cleanup error", e)
+             }
+            hidDevice = null
+        }
     }
 
     companion object {

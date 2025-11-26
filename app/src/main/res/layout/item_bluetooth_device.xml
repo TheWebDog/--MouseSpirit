@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="12dp"
+    android:background="?attr/selectableItemBackground">
+
+    <TextView
+        android:id="@+id/device_name"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Device Name"
+        android:textSize="16sp"
+        android:textStyle="bold"
+        android:textColor="#000000"/>
+
+    <TextView
+        android:id="@+id/device_address"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="00:11:22:33:44:55"
+        android:textSize="12sp"
+        android:textColor="#666666"/>
+
+    <TextView
+        android:id="@+id/device_status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="可连接"
+        android:textSize="14sp"
+        android:textColor="#0099CC"
+        android:layout_marginTop="4dp"/>
+
+</LinearLayout>

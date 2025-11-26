@@ -1,7 +1,8 @@
 package com.example.bluetoothmouse
 
 object HidConstants {
-    // 标准鼠标 HID Report Descriptor
+    // 标准鼠标 HID Report Descriptor (相对模式)
+    // 这是一个最通用的鼠标描述符，兼容性最好
     val MOUSE_REPORT_DESC = byteArrayOf(
         0x05.toByte(), 0x01.toByte(), // Usage Page (Generic Desktop Ctrls)
         0x09.toByte(), 0x02.toByte(), // Usage (Mouse)

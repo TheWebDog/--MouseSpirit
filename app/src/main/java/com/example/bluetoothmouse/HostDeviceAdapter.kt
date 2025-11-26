@@ -7,7 +7,7 @@ import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
 
 data class HostInfo(
-    val name: String,
+    var name: String,
     val address: String,
     val port: Int,
     var isPaired: Boolean = false
@@ -20,10 +20,30 @@ class HostDeviceAdapter(
     private val hosts = ArrayList<HostInfo>()
 
     fun addHost(host: HostInfo) {
-        // 避免重复添加 (简单根据 IP 判断)
         if (hosts.none { it.address == host.address }) {
             hosts.add(host)
             notifyItemInserted(hosts.size - 1)
+        }
+    }
+    
+    fun updateHostInfo(address: String, newName: String, isPaired: Boolean) {
+        val index = hosts.indexOfFirst { it.address == address }
+        if (index != -1) {
+            val host = hosts[index]
+            var changed = false
+            
+            if (host.name != newName) {
+                host.name = newName
+                changed = true
+            }
+            if (host.isPaired != isPaired) {
+                host.isPaired = isPaired
+                changed = true
+            }
+            
+            if (changed) {
+                notifyItemChanged(index)
+            }
         }
     }
 
