@@ -2,11 +2,18 @@ package com.example.bluetoothmouse
 
 import android.content.Context
 import android.util.Log
+import okhttp3.ConnectionSpec
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.TlsVersion
 import org.xmlpull.v1.XmlPullParser
 import org.xmlpull.v1.XmlPullParserFactory
 import java.io.StringReader
+import java.net.URLEncoder
+import java.security.cert.X509Certificate
+import java.util.Collections
+import java.util.concurrent.TimeUnit
+import javax.net.ssl.X509TrustManager
 
 class PairingManager(private val context: Context) {
 
@@ -20,197 +27,243 @@ class PairingManager(private val context: Context) {
     fun initiatePairing(host: String, port: Int, pin: String, callback: PairingStepCallback) {
         Thread {
             try {
+                Log.e("[Mouse]Pairing", ">>> START PAIRING (Official Logic) with $host <<<")
+                
                 val uniqueId = PreferenceUtils.getUniqueId(context)
-                val clientCertHex = CryptoUtils.getCertificateHex(context)
+                val clientCertHex = CryptoUtils.getCertificatePemHex(context)
+                
+                if (clientCertHex.isEmpty()) {
+                    callback.onError("错误: 客户端证书未能生成")
+                    return@Thread
+                }
+                
                 val clientSalt = CryptoUtils.randomBytes(16)
                 val clientSaltHex = CryptoUtils.bytesToHex(clientSalt)
+                val deviceNameEncoded = URLEncoder.encode("Android Mouse", "UTF-8").replace("+", "%20")
                 
-                callback.onLog("Unique ID: $uniqueId")
-                callback.onLog("正在连接 $host:$port ...")
+                Log.e("[Mouse]Pairing", "Using ID: $uniqueId")
+
+                // Step 1: phrase=getservercert (HTTP 47989)
+                val baseParams = "uniqueid=$uniqueId&devicename=$deviceNameEncoded&updateTimestamp=0&localversion=0"
+                val step1Params = "$baseParams&phrase=getservercert&salt=$clientSaltHex&clientcert=$clientCertHex"
                 
-                // 补全参数：增加 updateTimestamp 和 localversion
-                // GET /pair?uniqueid=...&devicename=...&updateTimestamp=...&localversion=...&salt=...&clientcert=...
-                val query = "salt=$clientSaltHex&clientcert=$clientCertHex&updateTimestamp=0&localversion=0"
-                val url1 = buildUrl(host, port, query)
+                val pairPort = 47989
+                val url1 = "http://$host:$pairPort/pair?$step1Params"
                 
-                callback.onLog("请求URL: $url1")
+                Log.e("[Mouse]Pairing", "Step 1 Requesting Server Cert from $url1")
                 
-                val resp1 = executeRequest(url1, uniqueId)
+                // 设置 120 秒超时，等待用户输入 PIN
+                val resp1 = executeRequest(url1, pairPort, uniqueId, 120)
                 
-                callback.onLog("Step 1 响应码: ${resp1.statusCode}")
-                callback.onLog("Step 1 消息: ${resp1.statusMessage}")
+                Log.e("[Mouse]Pairing", "Step 1 Response Code: ${resp1.statusCode}")
                 
                 if (resp1.statusCode != 200) {
-                    callback.onError("连接被拒绝: ${resp1.statusMessage} (${resp1.statusCode})")
+                    Log.e("[Mouse]Pairing", "Step 1 Error Body: ${resp1.rawXml}")
+                    callback.onError("连接被拒绝 (${resp1.statusCode}): ${resp1.statusMessage}")
                     return@Thread
                 }
                 
-                val serverSaltHex = resp1.xmlMap["salt"] ?: ""
-                if (serverSaltHex.isEmpty()) {
-                    callback.onError("服务器未返回 Salt")
+                val paired = resp1.xmlMap["paired"]
+                if (paired != "1") {
+                    callback.onError("配对拒绝: paired=$paired (请确认 PC 端是否允许配对)")
                     return@Thread
                 }
                 
-                callback.onLog("获取到 Server Salt: $serverSaltHex")
-                callback.onStep1Success(serverSaltHex)
+                Log.e("[Mouse]Pairing", "Step 1 Success. Client Salt: $clientSaltHex")
+                callback.onStep1Success(clientSaltHex)
 
             } catch (e: Exception) {
-                Log.e("Pairing", "Init Error", e)
-                callback.onError("初始化失败: ${e.message}")
+                Log.e("[Mouse]Pairing", "CRASH", e)
+                callback.onError("程序异常: ${e.message}")
             }
         }.start()
     }
 
-    // 第二阶段逻辑保持不变，主要是 executeRequest 和 buildUrl 需要一致
-    fun completePairing(host: String, port: Int, pin: String, serverSaltHex: String, callback: PairingStepCallback) {
+    fun completePairing(host: String, port: Int, pin: String, clientSaltHex: String, callback: PairingStepCallback) {
         Thread {
             try {
                 val uniqueId = PreferenceUtils.getUniqueId(context)
-                callback.onLog("开始计算密钥...")
+                val deviceNameEncoded = URLEncoder.encode("Android Mouse", "UTF-8").replace("+", "%20")
+                Log.e("[Mouse]Pairing", "Completing Pairing...")
 
-                val serverSalt = CryptoUtils.hexToBytes(serverSaltHex)
+                val pairPort = 47989
+                val salt = CryptoUtils.hexToBytes(clientSaltHex)
+                
+                // PIN Hash (SHA256)
                 val pinBytes = pin.toByteArray(Charsets.UTF_8)
-                val combined = CryptoUtils.concat(serverSalt, pinBytes)
-                val keyFull = CryptoUtils.sha256(combined)
+                val saltedPin = CryptoUtils.concat(salt, pinBytes)
+                val keyHash = CryptoUtils.sha256(saltedPin)
+                
+                // AES Key (First 16 bytes of SHA256 hash)
                 val aesKey = ByteArray(16)
-                System.arraycopy(keyFull, 0, aesKey, 0, 16)
+                System.arraycopy(keyHash, 0, aesKey, 0, 16)
                 
-                callback.onLog("Step 2: 发送 Challenge...")
-                val clientSecret = CryptoUtils.randomBytes(16)
-                val clientSecretEnc = CryptoUtils.aesEncrypt(clientSecret, aesKey)
-                val clientSecretHex = CryptoUtils.bytesToHex(clientSecretEnc)
+                // Step 2: Client Challenge
+                val randomChallenge = CryptoUtils.randomBytes(16)
+                val encryptedChallenge = CryptoUtils.aesEncrypt(randomChallenge, aesKey)
+                val encryptedChallengeHex = CryptoUtils.bytesToHex(encryptedChallenge)
                 
-                val url2 = buildUrl(host, port, "clientchallenge=$clientSecretHex")
-                val resp2 = executeRequest(url2, uniqueId)
+                val baseParams = "uniqueid=$uniqueId&devicename=$deviceNameEncoded&updateTimestamp=0&localversion=0"
+                val step2Params = "$baseParams&clientchallenge=$encryptedChallengeHex"
+                
+                val url2 = buildUrl(host, pairPort, step2Params)
+                val resp2 = executeRequest(url2, pairPort, uniqueId, 10)
                 
                 if (resp2.statusCode != 200) {
-                    callback.onError("PIN 验证失败: ${resp2.statusCode}")
+                    Log.e("[Mouse]Pairing", "Step 2 Failed: ${resp2.rawXml}")
+                    callback.onError("PIN 验证错误 (${resp2.statusCode})")
                     return@Thread
                 }
                 
-                val serverChallengeRespHex = resp2.xmlMap["serverchallengeresp"]
-                if (serverChallengeRespHex == null) {
-                    callback.onError("服务器响应异常 (Missing Challenge Resp)")
+                // Step 3: Server Challenge Response
+                val encServerChallengeRespHex = resp2.xmlMap["challengeresponse"]
+                if (encServerChallengeRespHex == null) {
+                    callback.onError("协议错误: 缺少 challengeresponse")
                     return@Thread
                 }
                 
-                callback.onLog("Step 3: 交换配对密钥...")
-                val clientPairingSecret = CryptoUtils.randomBytes(16)
-                val clientPairingSecretEnc = CryptoUtils.aesEncrypt(clientPairingSecret, aesKey)
-                val clientPairingSecretHex = CryptoUtils.bytesToHex(clientPairingSecretEnc)
+                val encServerChallengeResp = CryptoUtils.hexToBytes(encServerChallengeRespHex)
+                val decServerChallengeResp = CryptoUtils.aesDecrypt(encServerChallengeResp, aesKey)
                 
-                val url3 = buildUrl(host, port, "clientpairingsecret=$clientPairingSecretHex")
-                val resp3 = executeRequest(url3, uniqueId)
+                // Decrypted format: ServerResponse(32) + ServerChallenge(16)
+                if (decServerChallengeResp.size < 48) {
+                     callback.onError("协议错误: 解密数据长度不足 (${decServerChallengeResp.size})")
+                     return@Thread
+                }
                 
-                if (resp3.statusCode != 200) {
-                    callback.onError("密钥交换失败")
+                val serverChallenge = ByteArray(16)
+                System.arraycopy(decServerChallengeResp, 32, serverChallenge, 0, 16)
+                
+                // Step 3: 计算 Hash
+                // hash = SHA256( ServerChallenge + ClientCertSig + ClientSecret )
+                val clientSecret = CryptoUtils.randomBytes(16)
+                val clientCertSig = CryptoUtils.getCertificateSignature(context)
+                
+                if (clientCertSig == null) {
+                    callback.onError("错误: 无法获取证书签名")
                     return@Thread
                 }
                 
-                val serverPairingSecretHex = resp3.xmlMap["serverpairingsecret"]
+                // 拼接: ServerChallenge + ClientCertSig + ClientSecret
+                val dataToHash = CryptoUtils.concat(CryptoUtils.concat(serverChallenge, clientCertSig), clientSecret)
+                val challengeRespHash = CryptoUtils.sha256(dataToHash)
                 
-                callback.onLog("Step 4: 签署证书...")
-                val serverSecretBytes = CryptoUtils.hexToBytes(serverPairingSecretHex ?: "")
-                val myCertBytes = CryptoUtils.getCertificateBytes(context) ?: ByteArray(0)
-                val dataToSign = CryptoUtils.concat(myCertBytes, serverSecretBytes)
+                // Encrypt Hash
+                val challengeRespEncrypted = CryptoUtils.aesEncrypt(challengeRespHash, aesKey)
+                val challengeRespEncryptedHex = CryptoUtils.bytesToHex(challengeRespEncrypted)
                 
-                val signature = CryptoUtils.signData(context, dataToSign)
-                if (signature == null) {
+                val step3Params = "$baseParams&serverchallengeresp=$challengeRespEncryptedHex"
+                val url3 = buildUrl(host, pairPort, step3Params)
+                val resp3 = executeRequest(url3, pairPort, uniqueId, 10)
+                
+                // 这里如果返回 200，说明 Server 接受了我们的 Hash (证明我们是合法的客户端)
+                if (resp3.statusCode != 200 || resp3.xmlMap["paired"] != "1") {
+                    Log.e("[Mouse]Pairing", "Step 3 Failed: ${resp3.rawXml}")
+                    callback.onError("密钥交换错误 (Step 3)")
+                    return@Thread
+                }
+                
+                // Step 4: Client Pairing Secret
+                // signature = Sign(ClientSecret) using Client Private Key
+                val clientSecretSig = CryptoUtils.signData(context, clientSecret)
+                if (clientSecretSig == null) {
                     callback.onError("签名失败")
                     return@Thread
                 }
                 
-                val signatureHex = CryptoUtils.bytesToHex(signature)
-                val url4 = buildUrl(host, port, "clientpairingsecret=$clientPairingSecretHex&clientsignature=$signatureHex")
+                // data = ClientSecret + Signature
+                val clientPairingSecret = CryptoUtils.concat(clientSecret, clientSecretSig)
+                val clientPairingSecretHex = CryptoUtils.bytesToHex(clientPairingSecret)
                 
-                val resp4 = executeRequest(url4, uniqueId)
+                val step4Params = "$baseParams&clientpairingsecret=$clientPairingSecretHex"
+                val url4 = buildUrl(host, pairPort, step4Params)
+                val resp4 = executeRequest(url4, pairPort, uniqueId, 10)
                 
                 if (resp4.statusCode == 200 && resp4.xmlMap["paired"] == "1") {
-                    callback.onLog("配对成功!")
+                    Log.e("[Mouse]Pairing", "SUCCESS!")
                     callback.onPairingSuccess()
                 } else {
-                    callback.onError("最终验证失败: ${resp4.statusMessage}")
+                    Log.e("[Mouse]Pairing", "Step 4 Failed: ${resp4.rawXml}")
+                    callback.onError("最终确认失败: ${resp4.statusMessage}")
                 }
 
             } catch (e: Exception) {
-                Log.e("Pairing", "Complete Error", e)
+                Log.e("[Mouse]Pairing", "Complete Error", e)
                 callback.onError("验证过程异常: ${e.message}")
             }
         }.start()
     }
 
     private fun buildUrl(host: String, port: Int, query: String): String {
-        val protocol = if (port == 47984) "https" else "http"
+        val protocol = "http"
         val hostStr = if (host.contains(":")) "[$host]" else host
         return "$protocol://$hostStr:$port/pair?$query"
     }
 
-    private data class Response(val statusCode: Int, val statusMessage: String, val xmlMap: Map<String, String>)
+    private data class Response(val statusCode: Int, val statusMessage: String, val xmlMap: Map<String, String>, val rawXml: String)
 
-    private fun executeRequest(url: String, uniqueId: String): Response {
-        val client = NetworkUtils.getUnsafeOkHttpClient()
+    private fun executeRequest(url: String, port: Int, uniqueId: String, timeoutSeconds: Long): Response {
+        val clientBuilder = NetworkUtils.getUnsafeOkHttpClient().newBuilder()
         
-        // Append common parameters if not present in url
-        var fullUrl = url
-        if (!fullUrl.contains("uniqueid=")) {
-            fullUrl += "&uniqueid=$uniqueId"
-        }
-        if (!fullUrl.contains("devicename=")) {
-            fullUrl += "&devicename=AndroidMouse"
-        }
-        if (!fullUrl.contains("updateTimestamp=")) {
-             fullUrl += "&updateTimestamp=0"
-        }
-        if (!fullUrl.contains("localversion=")) {
-             fullUrl += "&localversion=0"
-        }
+        // 关键：设置足够长的超时，等待用户输入 PIN
+        clientBuilder.readTimeout(timeoutSeconds, TimeUnit.SECONDS)
+        clientBuilder.writeTimeout(timeoutSeconds, TimeUnit.SECONDS)
+        clientBuilder.connectTimeout(10, TimeUnit.SECONDS)
+        
+        val client = clientBuilder.build()
         
         val request = Request.Builder()
-            .url(fullUrl)
+            .url(url)
             .header("X-Nv-ClientID", uniqueId)
             .header("Connection", "close")
             .build()
 
-        client.newCall(request).execute().use { response ->
-            val xml = response.body?.string() ?: ""
-            val map = parseXml(xml)
-            
-            var code = response.code
-            var msg = response.message
-            
-            if (map.containsKey("status_code")) {
-                code = map["status_code"]?.toIntOrNull() ?: code
+        try {
+            client.newCall(request).execute().use { response ->
+                val xml = response.body?.string() ?: ""
+                val map = parseXml(xml)
+                var code = response.code
+                var msg = response.message
+                if (map.containsKey("status_code")) {
+                    code = map["status_code"]?.toIntOrNull() ?: code
+                }
+                if (map.containsKey("status_message")) {
+                    msg = map["status_message"] ?: msg
+                }
+                return Response(code, msg, map, xml)
             }
-            if (map.containsKey("status_message")) {
-                msg = map["status_message"] ?: msg
-            }
-            
-            return Response(code, msg, map)
+        } catch (e: Exception) {
+             Log.e("[Mouse]Pairing", "Request failed: $url", e)
+             return Response(0, "Request Failed: ${e.message}", emptyMap(), "")
         }
     }
 
     private fun parseXml(xml: String): Map<String, String> {
         val map = HashMap<String, String>()
+        if (xml.isBlank()) return map
         try {
             val factory = XmlPullParserFactory.newInstance()
             val parser = factory.newPullParser()
             parser.setInput(StringReader(xml))
-            
             var eventType = parser.eventType
+            var currentTag = ""
             while (eventType != XmlPullParser.END_DOCUMENT) {
-                if (eventType == XmlPullParser.START_TAG) {
-                    val tagName = parser.name
-                    for (i in 0 until parser.attributeCount) {
-                        map[parser.getAttributeName(i)] = parser.getAttributeValue(i)
+                when (eventType) {
+                    XmlPullParser.START_TAG -> {
+                        currentTag = parser.name
+                        for (i in 0 until parser.attributeCount) {
+                             map[parser.getAttributeName(i)] = parser.getAttributeValue(i)
+                        }
                     }
-                    try {
-                        if (parser.next() == XmlPullParser.TEXT) {
+                    XmlPullParser.TEXT -> {
+                        if (currentTag.isNotEmpty()) {
                             val text = parser.text
                             if (text.isNotBlank()) {
-                                map[tagName] = text
+                                map[currentTag] = text
                             }
                         }
-                    } catch (e: Exception) { }
+                    }
+                    XmlPullParser.END_TAG -> { currentTag = "" }
                 }
                 eventType = parser.next()
             }

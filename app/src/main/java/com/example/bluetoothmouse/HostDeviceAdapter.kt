@@ -20,9 +20,18 @@ class HostDeviceAdapter(
     private val hosts = ArrayList<HostInfo>()
 
     fun addHost(host: HostInfo) {
-        if (hosts.none { it.address == host.address }) {
+        val index = hosts.indexOfFirst { it.address == host.address }
+        if (index == -1) {
             hosts.add(host)
             notifyItemInserted(hosts.size - 1)
+        } else {
+            // 如果已存在，更新端口或名称
+            val existing = hosts[index]
+            if (existing.name != host.name || existing.port != host.port) {
+                existing.name = host.name
+                // 端口一般不轻易变，但如果从47989变成47984这种可以更新
+                notifyItemChanged(index)
+            }
         }
     }
     
@@ -32,7 +41,7 @@ class HostDeviceAdapter(
             val host = hosts[index]
             var changed = false
             
-            if (host.name != newName) {
+            if (host.name != newName && newName.isNotBlank()) {
                 host.name = newName
                 changed = true
             }

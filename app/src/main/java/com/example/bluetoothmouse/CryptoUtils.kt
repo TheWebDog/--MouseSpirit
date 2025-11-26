@@ -1,14 +1,19 @@
 package com.example.bluetoothmouse
 
 import android.content.Context
+import android.util.Log
 import org.bouncycastle.asn1.x500.X500Name
+import org.bouncycastle.asn1.x500.style.BCStyle
+import org.bouncycastle.asn1.x500.X500NameBuilder
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
+import org.bouncycastle.openssl.jcajce.JcaPEMWriter
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 import java.io.ByteArrayInputStream
+import java.io.StringWriter
 import java.math.BigInteger
-import java.nio.charset.StandardCharsets
 import java.security.KeyFactory
+import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.MessageDigest
@@ -19,6 +24,7 @@ import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import java.security.spec.PKCS8EncodedKeySpec
 import java.util.Date
+import java.util.Locale
 import javax.crypto.Cipher
 import javax.crypto.spec.SecretKeySpec
 import javax.net.ssl.KeyManagerFactory
@@ -37,22 +43,33 @@ object CryptoUtils {
         }
     }
 
+    fun regenerateKeys(context: Context) {
+        generateAndSaveKeys(context)
+    }
+
     private fun generateAndSaveKeys(context: Context) {
         try {
+            Log.d("CryptoUtils", "Generating new RSA 2048 keys (Moonlight Official Style)...")
             val keyPairGenerator = KeyPairGenerator.getInstance("RSA")
             keyPairGenerator.initialize(2048, SecureRandom())
             val keyPair = keyPairGenerator.generateKeyPair()
 
             val notBefore = Date(System.currentTimeMillis() - 1000L * 60 * 60 * 24)
             val notAfter = Date(System.currentTimeMillis() + 1000L * 60 * 60 * 24 * 365 * 20)
-            val serial = BigInteger.valueOf(System.currentTimeMillis())
+            val serial = BigInteger.valueOf(System.currentTimeMillis()).abs()
             
+            val nameBuilder = X500NameBuilder(BCStyle.INSTANCE)
+            nameBuilder.addRDN(BCStyle.CN, "NVIDIA GameStream Client")
+            val name = nameBuilder.build()
+
+            // 官方 Moonlight 实现不添加 KeyUsage 或 ExtendedKeyUsage
+            // 也不显式添加 BasicConstraints
             val certBuilder = JcaX509v3CertificateBuilder(
-                X500Name("CN=NVIDIA GameStream Client"),
+                name,
                 serial,
                 notBefore,
                 notAfter,
-                X500Name("CN=NVIDIA GameStream Client"),
+                name,
                 keyPair.public
             )
             
@@ -68,8 +85,11 @@ object CryptoUtils {
                 .putString(PREF_KEY, keyString)
                 .putString(PREF_CERT, certString)
                 .apply()
+                
+            Log.d("CryptoUtils", "Keys generated and saved.")
             
         } catch (e: Exception) {
+            Log.e("CryptoUtils", "Key generation failed", e)
             e.printStackTrace()
         }
     }
@@ -78,12 +98,14 @@ object CryptoUtils {
         try {
             val (privateKey, cert) = loadKeys(context) ?: return null
 
-            val keyStore = KeyStore.getInstance(KeyStore.getDefaultType())
+            val keyStore = KeyStore.getInstance("PKCS12")
             keyStore.load(null, null)
-            keyStore.setKeyEntry(KEY_ALIAS, privateKey, null, arrayOf(cert))
+            
+            val pwd = "password".toCharArray()
+            keyStore.setKeyEntry(KEY_ALIAS, privateKey, pwd, arrayOf(cert))
 
             val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
-            kmf.init(keyStore, null)
+            kmf.init(keyStore, pwd)
 
             val trustAllCerts = arrayOf<javax.net.ssl.TrustManager>(
                 object : javax.net.ssl.X509TrustManager {
@@ -99,7 +121,7 @@ object CryptoUtils {
             return sslContext
 
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e("CryptoUtils", "Failed to create SSLContext", e)
             return null
         }
     }
@@ -109,15 +131,46 @@ object CryptoUtils {
         val keyStr = prefs.getString(PREF_KEY, null) ?: return null
         val certStr = prefs.getString(PREF_CERT, null) ?: return null
 
-        val keyBytes = android.util.Base64.decode(keyStr, android.util.Base64.DEFAULT)
-        val keyFactory = KeyFactory.getInstance("RSA")
-        val privateKey = keyFactory.generatePrivate(PKCS8EncodedKeySpec(keyBytes))
+        try {
+            val keyBytes = android.util.Base64.decode(keyStr, android.util.Base64.DEFAULT)
+            val keyFactory = KeyFactory.getInstance("RSA")
+            val privateKey = keyFactory.generatePrivate(PKCS8EncodedKeySpec(keyBytes))
 
-        val certBytes = android.util.Base64.decode(certStr, android.util.Base64.DEFAULT)
-        val certFactory = CertificateFactory.getInstance("X.509")
-        val cert = certFactory.generateCertificate(ByteArrayInputStream(certBytes)) as X509Certificate
-        
-        return Pair(privateKey, cert)
+            val certBytes = android.util.Base64.decode(certStr, android.util.Base64.DEFAULT)
+            val certFactory = CertificateFactory.getInstance("X.509")
+            val cert = certFactory.generateCertificate(ByteArrayInputStream(certBytes)) as X509Certificate
+            
+            return Pair(privateKey, cert)
+        } catch (e: Exception) {
+            Log.e("CryptoUtils", "Error loading keys", e)
+            return null
+        }
+    }
+    
+    fun getCertificateSignature(context: Context): ByteArray? {
+        val (_, cert) = loadKeys(context) ?: return null
+        return cert.signature
+    }
+    
+    fun getPrivateKey(context: Context): PrivateKey? {
+        val (pk, _) = loadKeys(context) ?: return null
+        return pk
+    }
+
+    fun getCertificatePemHex(context: Context): String {
+        val (_, cert) = loadKeys(context) ?: return ""
+        try {
+            val strWriter = StringWriter()
+            val pemWriter = JcaPEMWriter(strWriter)
+            pemWriter.writeObject(cert)
+            pemWriter.close()
+            
+            val pemStr = strWriter.toString().replace("\r", "")
+            return bytesToHex(pemStr.toByteArray(Charsets.UTF_8))
+        } catch (e: Exception) {
+            Log.e("CryptoUtils", "Failed to generate PEM Hex", e)
+            return ""
+        }
     }
     
     fun getCertificateHex(context: Context): String {
@@ -177,6 +230,18 @@ object CryptoUtils {
             val (privateKey, _) = loadKeys(context) ?: return null
             val signature = Signature.getInstance("SHA256withRSA")
             signature.initSign(privateKey)
+            signature.update(data)
+            signature.sign()
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        }
+    }
+    
+    fun signData(key: PrivateKey, data: ByteArray): ByteArray? {
+        return try {
+            val signature = Signature.getInstance("SHA256withRSA")
+            signature.initSign(key)
             signature.update(data)
             signature.sign()
         } catch (e: Exception) {

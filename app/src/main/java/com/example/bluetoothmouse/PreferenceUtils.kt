@@ -1,32 +1,13 @@
 package com.example.bluetoothmouse
 
 import android.content.Context
-import android.content.SharedPreferences
-import java.util.UUID
+import android.util.Log
 
 object PreferenceUtils {
-    private const val PREF_NAME = "moonlight_prefs"
-    private const val KEY_CLIENT_ID = "client_id"
-
-    private fun getPrefs(context: Context): SharedPreferences {
-        return context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-    }
-
+    // 根据 Moonlight 官方源码，使用固定的 Unique ID
     fun getUniqueId(context: Context): String {
-        val prefs = getPrefs(context)
-        var uuid = prefs.getString(KEY_CLIENT_ID, null)
-        
-        // 自动修复：如果检测到旧的带连字符的 UUID，强制清洗
-        if (uuid != null && uuid.contains("-")) {
-            uuid = uuid.replace("-", "").uppercase()
-            prefs.edit().putString(KEY_CLIENT_ID, uuid).apply()
-        }
-
-        if (uuid == null) {
-            // Sunshine expects a hex string (UUID without dashes)
-            uuid = UUID.randomUUID().toString().replace("-", "").uppercase()
-            prefs.edit().putString(KEY_CLIENT_ID, uuid).apply()
-        }
-        return uuid!!
+        val fixedId = "0123456789ABCDEF"
+        Log.e("[Mouse]Pref", "Using official fixed Client ID: $fixedId")
+        return fixedId
     }
 }
