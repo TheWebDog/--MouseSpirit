@@ -2,7 +2,6 @@ package com.example.bluetoothmouse
 
 import android.content.Context
 import android.util.Log
-import org.bouncycastle.asn1.x500.X500Name
 import org.bouncycastle.asn1.x500.style.BCStyle
 import org.bouncycastle.asn1.x500.X500NameBuilder
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
@@ -13,7 +12,6 @@ import java.io.ByteArrayInputStream
 import java.io.StringWriter
 import java.math.BigInteger
 import java.security.KeyFactory
-import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.MessageDigest
@@ -24,7 +22,6 @@ import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import java.security.spec.PKCS8EncodedKeySpec
 import java.util.Date
-import java.util.Locale
 import javax.crypto.Cipher
 import javax.crypto.spec.SecretKeySpec
 import javax.net.ssl.KeyManagerFactory
