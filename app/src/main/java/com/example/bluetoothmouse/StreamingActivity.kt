@@ -27,7 +27,10 @@ import org.xmlpull.v1.XmlPullParserFactory
 import java.io.StringReader
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
+import javax.net.ssl.X509TrustManager
 import kotlin.random.Random
+
+data class NvApp(val appName: String, val appId: String)
 
 class StreamingActivity : AppCompatActivity() {
 
@@ -48,8 +51,8 @@ class StreamingActivity : AppCompatActivity() {
 
     private val resolveTimeoutRunnable = Runnable {
         if (isResolving) {
-            Log.e("Streaming", "Resolve timed out - forcing next")
-            isResolving = false // 强制重置状态
+            Log.e("[Mouse]Debug", "Resolve timed out - forcing next")
+            isResolving = false 
             processNextInQueue()
         }
     }
@@ -71,12 +74,11 @@ class StreamingActivity : AppCompatActivity() {
                 statusText.text = "正在搜索 Sunshine 主机..."
                 refreshBtn.isEnabled = false
             }
-            // 缩短自动搜索时间到 5 秒，避免长时间占用
             mainHandler.postDelayed(stopDiscoveryTask, 5000)
         }
 
         override fun onServiceFound(service: NsdServiceInfo) {
-            Log.d("Streaming", "Service found: ${service.serviceName}")
+            Log.d("[Mouse]Debug", "Service found: ${service.serviceName}")
             if (service.serviceType.contains("_nvstream")) {
                 val newService = NsdServiceInfo()
                 newService.serviceName = service.serviceName
@@ -86,7 +88,7 @@ class StreamingActivity : AppCompatActivity() {
         }
 
         override fun onServiceLost(service: NsdServiceInfo) {
-            Log.e("Streaming", "Service lost: ${service.serviceName}")
+            Log.e("[Mouse]Debug", "Service lost: ${service.serviceName}")
         }
 
         override fun onDiscoveryStopped(serviceType: String) {
@@ -106,7 +108,7 @@ class StreamingActivity : AppCompatActivity() {
         }
 
         override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
-            Log.e("Streaming", "Discovery failed: $errorCode")
+            Log.e("[Mouse]Debug", "Discovery failed: $errorCode")
             isDiscoveryRunning = false
             try { nsdManager.stopServiceDiscovery(this) } catch (e: Exception) {}
             runOnUiThread {
@@ -116,14 +118,14 @@ class StreamingActivity : AppCompatActivity() {
         }
 
         override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {
-            Log.e("Streaming", "Stop Discovery failed: $errorCode")
+            Log.e("[Mouse]Debug", "Stop Discovery failed: $errorCode")
             try { nsdManager.stopServiceDiscovery(this) } catch (e: Exception) {}
         }
     }
 
     private val resolveListener = object : NsdManager.ResolveListener {
         override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
-            Log.e("Streaming", "Resolve failed: $errorCode")
+            Log.e("[Mouse]Debug", "Resolve failed: $errorCode")
             mainHandler.removeCallbacks(resolveTimeoutRunnable)
             isResolving = false
             processNextInQueue()
@@ -131,7 +133,7 @@ class StreamingActivity : AppCompatActivity() {
 
         override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
             mainHandler.removeCallbacks(resolveTimeoutRunnable)
-            Log.d("Streaming", "Resolve Succeeded: ${serviceInfo.host}")
+            Log.d("[Mouse]Debug", "Resolve Succeeded: ${serviceInfo.host}")
             val hostIp = serviceInfo.host.hostAddress
             val port = serviceInfo.port
             val mDnsName = serviceInfo.serviceName
@@ -162,7 +164,7 @@ class StreamingActivity : AppCompatActivity() {
             try {
                 nsdManager.resolveService(nextService, resolveListener)
             } catch (e: Exception) {
-                Log.e("Streaming", "Resolution crash", e)
+                Log.e("[Mouse]Debug", "Resolution crash", e)
                 mainHandler.removeCallbacks(resolveTimeoutRunnable)
                 mainHandler.postDelayed({ 
                     isResolving = false
@@ -175,44 +177,99 @@ class StreamingActivity : AppCompatActivity() {
     }
 
     private fun fetchServerInfo(ip: String) {
-        // 直接使用 HTTP 47989 获取信息，这比 HTTPS 快且不需要证书
         executor.execute {
             try {
                 val hostString = if (ip.contains(":")) "[$ip]" else ip
-                // 优先尝试 HTTP 47989
-                tryFetchInfo(hostString, 47989, ip)
+                
+                // 优先尝试 HTTPS 47984
+                Log.e("[Mouse]Debug", "Fetching info for $ip. Trying HTTPS 47984...")
+                var success = tryFetchInfo(hostString, 47984, ip, true)
+                
+                if (!success) {
+                    Log.e("[Mouse]Debug", "HTTPS 47984 failed. Fallback to HTTP 47989...")
+                    tryFetchInfo(hostString, 47989, ip, false)
+                } else {
+                    Log.e("[Mouse]Debug", "HTTPS 47984 SUCCESS.")
+                }
             } catch (e: Exception) {
                 e.printStackTrace()
             }
         }
     }
 
-    private fun tryFetchInfo(hostString: String, port: Int, originalIp: String) {
+    private fun tryFetchInfo(hostString: String, port: Int, originalIp: String, useHttps: Boolean): Boolean {
         try {
-            // 使用 unsafe client 即可
-            val url = "http://$hostString:$port/serverinfo"
-            val client = NetworkUtils.getUnsafeOkHttpClient()
+            val protocol = if (useHttps) "https" else "http"
+            val uniqueId = PreferenceUtils.getUniqueId(this)
+            val url = "$protocol://$hostString:$port/serverinfo?uniqueid=$uniqueId"
+            
+            Log.e("[Mouse]Debug", "Req URL: $url")
+            Log.e("[Mouse]Debug", "Req ID: $uniqueId")
+
+            val client = if (useHttps) {
+                val sslContext = CryptoUtils.getClientSSLContext(this)
+                if (sslContext != null) {
+                    OkHttpClient.Builder()
+                        .sslSocketFactory(sslContext.socketFactory, object : X509TrustManager {
+                             override fun checkClientTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {}
+                             override fun checkServerTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {}
+                             override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
+                        })
+                        .hostnameVerifier { _, _ -> true }
+                        .connectTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
+                        .build()
+                } else {
+                    Log.e("[Mouse]Debug", "SSLContext is NULL!")
+                    return false
+                }
+            } else {
+                NetworkUtils.getUnsafeOkHttpClient()
+            }
+
             val request = Request.Builder()
                 .url(url)
+                .header("X-Nv-ClientID", uniqueId) 
                 .header("Connection", "close")
                 .build()
 
             client.newCall(request).execute().use { response ->
+                val bodyStr = response.body?.string() ?: ""
+                
+                // 为了调试，如果还没配对成功，打印全部 XML 看看 PairStatus 到底叫什么
+                if (!useHttps && bodyStr.length < 1000) {
+                     Log.e("[Mouse]Debug", "Full XML: $bodyStr")
+                }
+
                 if (response.isSuccessful) {
-                    val xml = response.body?.string()
-                    if (xml != null) {
-                        val info = parseServerInfo(xml)
-                        if (info != null && info.hostname.isNotBlank()) {
+                    val info = parseServerInfo(bodyStr)
+                    if (info != null) {
+                        Log.e("[Mouse]Debug", "Parsed: Host=${info.hostname}, Paired=${info.paired}")
+                        if (info.hostname.isNotBlank()) {
                             runOnUiThread {
-                                hostAdapter.updateHostInfo(originalIp, info.hostname, info.paired)
+                                if (useHttps) {
+                                    hostAdapter.updateHostInfo(originalIp, info.hostname, info.paired)
+                                } else {
+                                    if (info.paired) {
+                                        hostAdapter.updateHostInfo(originalIp, info.hostname, true)
+                                    } else {
+                                        hostAdapter.addHost(HostInfo(info.hostname, originalIp, port, false))
+                                    }
+                                }
                             }
+                            return true
                         }
+                    } else {
+                        Log.e("[Mouse]Debug", "Parse XML Failed")
                     }
+                } else {
+                    Log.e("[Mouse]Debug", "Request Failed with code: ${response.code}")
                 }
             }
         } catch (e: Exception) { 
-            Log.w("Streaming", "Fetch info failed for $originalIp: ${e.message}")
+            Log.e("[Mouse]Debug", "Fetch EXCEPTION for $originalIp ($port): ${e.message}")
+            e.printStackTrace()
         }
+        return false
     }
 
     data class ServerInfo(val hostname: String, val paired: Boolean)
@@ -227,7 +284,7 @@ class StreamingActivity : AppCompatActivity() {
             var eventType = parser.eventType
             while (eventType != XmlPullParser.END_DOCUMENT) {
                 if (eventType == XmlPullParser.START_TAG) {
-                    when (parser.name) {
+                    when (parser.name.lowercase()) { // 忽略大小写
                         "hostname" -> { try { hostname = parser.nextText() } catch (e: Exception) {} }
                         "pairstatus" -> { try { paired = parser.nextText() == "1" } catch (e: Exception) {} }
                     }
@@ -244,7 +301,11 @@ class StreamingActivity : AppCompatActivity() {
         setContentView(R.layout.activity_streaming)
 
         executor.execute {
-             CryptoUtils.regenerateKeys(this)
+             val certHex = CryptoUtils.getCertificatePemHex(this)
+             val certSig = CryptoUtils.getCertificateSignature(this)
+             Log.e("[Mouse]Debug", "APP START. Cert First 20 chars: ${certHex.take(20)}")
+             Log.e("[Mouse]Debug", "APP START. Cert Sig Hash: ${certSig?.contentHashCode()}")
+             
              CryptoUtils.ensureKeysExist(this) 
         }
         
@@ -266,17 +327,13 @@ class StreamingActivity : AppCompatActivity() {
         refreshBtn = findViewById(R.id.btn_refresh)
         val recycler = findViewById<RecyclerView>(R.id.recycler_hosts)
         
-        // 添加手动输入 IP 的功能 (临时 debug 用，点击标题栏文字)
         statusText.setOnClickListener {
             showManualIpDialog()
         }
 
         hostAdapter = HostDeviceAdapter { host ->
-            Toast.makeText(this, "尝试连接 ${host.name}...", Toast.LENGTH_SHORT).show()
-            Log.e("[Mouse]Streaming", "CLICKED Host: ${host.name} at ${host.address}")
-            
             if (host.isPaired) {
-                 Toast.makeText(this, "该设备已配对", Toast.LENGTH_SHORT).show()
+                 fetchAppList(host)
             } else {
                  prepareAndPair(host)
             }
@@ -288,15 +345,125 @@ class StreamingActivity : AppCompatActivity() {
         refreshBtn.setOnClickListener { refreshDiscovery() }
     }
     
+    private fun fetchAppList(host: HostInfo) {
+        val pd = AlertDialog.Builder(this)
+            .setTitle("获取应用列表...")
+            .setMessage("正在连接 ${host.name}...")
+            .setCancelable(false)
+            .create()
+        pd.show()
+
+        executor.execute {
+            try {
+                val uniqueId = PreferenceUtils.getUniqueId(this)
+                val url = "https://${host.address}:47984/applist?uniqueid=$uniqueId"
+                
+                Log.e("[Mouse]Debug", "Fetching App List: $url")
+                
+                val sslContext = CryptoUtils.getClientSSLContext(this)
+                if (sslContext == null) {
+                    runOnUiThread {
+                        pd.dismiss()
+                        Toast.makeText(this, "证书加载失败", Toast.LENGTH_SHORT).show()
+                    }
+                    return@execute
+                }
+
+                val client = OkHttpClient.Builder()
+                    .sslSocketFactory(sslContext.socketFactory, object : X509TrustManager {
+                         override fun checkClientTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {}
+                         override fun checkServerTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {}
+                         override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
+                    })
+                    .hostnameVerifier { _, _ -> true }
+                    .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+                    .build()
+
+                val request = Request.Builder()
+                    .url(url)
+                    .header("X-Nv-ClientID", uniqueId)
+                    .header("Connection", "close")
+                    .build()
+
+                client.newCall(request).execute().use { response ->
+                    val xml = response.body?.string()
+                    Log.e("[Mouse]Debug", "AppList Resp: ${response.code}")
+                    if (response.isSuccessful && xml != null) {
+                        val apps = parseAppList(xml)
+                        runOnUiThread {
+                            pd.dismiss()
+                            showAppListDialog(host, apps)
+                        }
+                    } else {
+                        runOnUiThread {
+                            pd.dismiss()
+                            Toast.makeText(this, "获取失败: ${response.code}", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("[Mouse]Debug", "AppList Error", e)
+                runOnUiThread {
+                    pd.dismiss()
+                    Toast.makeText(this, "连接错误: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    private fun parseAppList(xml: String): List<NvApp> {
+        val apps = ArrayList<NvApp>()
+        try {
+            val factory = XmlPullParserFactory.newInstance()
+            val parser = factory.newPullParser()
+            parser.setInput(StringReader(xml))
+            
+            var eventType = parser.eventType
+            var currentAppName = ""
+            var currentAppId = ""
+            
+            while (eventType != XmlPullParser.END_DOCUMENT) {
+                if (eventType == XmlPullParser.START_TAG) {
+                    when (parser.name) {
+                        "AppTitle" -> { try { currentAppName = parser.nextText() } catch (e: Exception) {} }
+                        "ID" -> { try { currentAppId = parser.nextText() } catch (e: Exception) {} }
+                    }
+                } else if (eventType == XmlPullParser.END_TAG) {
+                    if (parser.name == "App") {
+                        if (currentAppName.isNotBlank() && currentAppId.isNotBlank()) {
+                            apps.add(NvApp(currentAppName, currentAppId))
+                        }
+                        currentAppName = ""
+                        currentAppId = ""
+                    }
+                }
+                eventType = parser.next()
+            }
+        } catch (e: Exception) { }
+        return apps
+    }
+
+    private fun showAppListDialog(host: HostInfo, apps: List<NvApp>) {
+        val appNames = apps.map { it.appName }.toTypedArray()
+        
+        AlertDialog.Builder(this)
+            .setTitle("选择应用启动")
+            .setItems(appNames) { _, which ->
+                val selectedApp = apps[which]
+                Toast.makeText(this, "正在启动 ${selectedApp.appName}...", Toast.LENGTH_SHORT).show()
+                // TODO: 发送 Launch 请求
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+    
     override fun onResume() {
         super.onResume()
-        // 每次回到页面都自动开始搜索
         refreshDiscovery()
     }
     
     override fun onPause() {
         super.onPause()
-        // 离开页面停止搜索，释放资源
         stopDiscovery()
     }
 
@@ -320,7 +487,6 @@ class StreamingActivity : AppCompatActivity() {
 
     private fun prepareAndPair(host: HostInfo) {
         Log.e("[Mouse]Streaming", "prepareAndPair started for ${host.address}")
-        
         val pin = String.format("%04d", Random.nextInt(10000))
 
         val messageView = TextView(this)
@@ -378,12 +544,7 @@ class StreamingActivity : AppCompatActivity() {
                 runOnUiThread {
                     pd.dismiss()
                     Toast.makeText(this@StreamingActivity, "配对成功！", Toast.LENGTH_SHORT).show()
-                    // 刷新列表项状态
                     hostAdapter.updateHostInfo(host.address, host.name, true)
-                    // 延迟进入下一步，给用户一点反馈时间
-                    mainHandler.postDelayed({
-                        // TODO: 跳转到鼠标控制界面
-                    }, 1000)
                 }
             }
 
@@ -413,7 +574,6 @@ class StreamingActivity : AppCompatActivity() {
     }
 
     private fun startDiscovery() {
-        // 每次启动搜索前，强制刷新组播锁
         multicastLock?.let {
             if (it.isHeld) it.release()
             it.acquire()
@@ -427,7 +587,6 @@ class StreamingActivity : AppCompatActivity() {
         isResolving = false
         mainHandler.removeCallbacks(resolveTimeoutRunnable)
 
-        // 稍微延时启动，确保之前的 stop 完成
         mainHandler.postDelayed({
             try {
                 nsdManager.discoverServices("_nvstream._tcp.", NsdManager.PROTOCOL_DNS_SD, discoveryListener)
