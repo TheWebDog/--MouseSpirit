@@ -47,6 +47,11 @@
         <activity android:name=".BluetoothActivity" android:exported="false" />
         <activity android:name=".MouseTestActivity" android:exported="false" />
         <activity android:name=".StreamingActivity" android:exported="false" />
+        <activity 
+            android:name=".GameActivity" 
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboard|keyboardHidden|navigation" 
+            android:screenOrientation="landscape" />
 
     </application>
 

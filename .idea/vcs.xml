@@ -2,5 +2,8 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/moonlight-android" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/moonlight-android/app/src/main/jni/moonlight-core/moonlight-common-c" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/moonlight-android/app/src/main/jni/moonlight-core/moonlight-common-c/enet" vcs="Git" />
   </component>
 </project>

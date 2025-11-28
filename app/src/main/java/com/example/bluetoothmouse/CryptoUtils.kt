@@ -2,6 +2,7 @@ package com.example.bluetoothmouse
 
 import android.content.Context
 import android.util.Log
+import com.limelight.nvstream.http.LimelightCryptoProvider
 import org.bouncycastle.asn1.x500.style.BCStyle
 import org.bouncycastle.asn1.x500.X500NameBuilder
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
@@ -27,11 +28,36 @@ import javax.crypto.spec.SecretKeySpec
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
 
-object CryptoUtils {
+object CryptoUtils : LimelightCryptoProvider {
     private const val KEY_STORE_NAME = "MoonlightKS"
     private const val KEY_ALIAS = "client_cert"
     private const val PREF_KEY = "client_private_key"
     private const val PREF_CERT = "client_certificate"
+    
+    // 上下文缓存，因为 LimelightCryptoProvider 接口方法不带 Context 参数
+    private var appContext: Context? = null
+    
+    fun init(context: Context) {
+        appContext = context.applicationContext
+    }
+
+    override fun getClientCertificate(): X509Certificate {
+        val (_, cert) = loadKeys(appContext!!) ?: throw IllegalStateException("Keys not loaded")
+        return cert
+    }
+
+    override fun getClientPrivateKey(): PrivateKey {
+        val (pk, _) = loadKeys(appContext!!) ?: throw IllegalStateException("Keys not loaded")
+        return pk
+    }
+
+    override fun getPemEncodedClientCertificate(): ByteArray {
+        return getCertificatePemHex(appContext!!).toByteArray(Charsets.UTF_8)
+    }
+
+    override fun encodeBase64String(data: ByteArray): String {
+        return android.util.Base64.encodeToString(data, android.util.Base64.NO_WRAP)
+    }
 
     fun ensureKeysExist(context: Context) {
         val prefs = context.getSharedPreferences(KEY_STORE_NAME, Context.MODE_PRIVATE)
