@@ -30,6 +30,7 @@ import com.limelight.nvstream.http.PairingManager
 import com.limelight.nvstream.http.PairingManager.PairState
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
+import kotlin.random.Random
 
 class StreamingActivity : AppCompatActivity() {
 
@@ -329,7 +330,7 @@ class StreamingActivity : AppCompatActivity() {
                 context.streamConfig = config
                 context.serverAddress = ComputerDetails.AddressTuple(hostInfo.address, hostInfo.port)
                 context.httpsPort = NvHTTP.DEFAULT_HTTPS_PORT // Should get from server info
-                context.riKey = CryptoUtils.getClientPrivateKey() // Using private key as RI Key for now? No, RI Key is usually separate.
+                
                 // Note: In Moonlight, RI Key is often generated per session or re-used.
                 // For simplicity, let's generate a random AES key.
                 // Actually, StreamConfiguration handles some of this, but ConnectionContext needs riKey.

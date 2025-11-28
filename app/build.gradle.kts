@@ -5,14 +5,12 @@ plugins {
 
 android {
     namespace = "com.example.bluetoothmouse"
-    compileSdk {
-        version = release(36)
-    }
+    compileSdk = 34
 
     defaultConfig {
         applicationId = "com.example.bluetoothmouse"
         minSdk = 28
-        targetSdk = 36
+        targetSdk = 34
         versionCode = 1
         versionName = "1.0"
 
@@ -32,6 +30,10 @@ android {
             abiFilters.add("x86_64")
             abiFilters.add("x86")
         }
+    }
+    
+    buildFeatures {
+        buildConfig = true
     }
 
     externalNativeBuild {
